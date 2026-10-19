@@ -18,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
@@ -76,25 +77,38 @@ private fun App(ble: BleManager) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("DK80 Tool") },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primary, titleContentColor = androidx.compose.ui.graphics.Color.White)
+                title = {
+                    Text(
+                        "DK80 Tool",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onBackground
+                )
             )
         },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 tabs.forEach { t ->
                     NavigationBarItem(
                         selected = current == t.route,
                         onClick = { nav.navigate(t.route) { popUpTo(tabs[0].route); launchSingleTop = true } },
                         icon = { Icon(t.icon, null) },
-                        label = { Text(t.label) }
+                        label = { Text(t.label) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        )
                     )
                 }
             }
         }
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            Spacer(Modifier.height(12.dp))
+        Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
             ConnectionBar(
                 state = state, deviceName = name,
                 onScan = { ble.startScan() },
