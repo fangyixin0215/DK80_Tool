@@ -10,7 +10,6 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -94,6 +93,13 @@ class BleManager private constructor(context: Context) {
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val dev = result.device ?: return
+            if (_state.value != BleState.Scanning) return
+            // 软件过滤：广播包中含 DK80 服务 UUID，或设备名为 DK80
+            val record = result.scanRecord
+            val hasService = record?.serviceUuids
+                ?.any { it.uuid == BleUuids.DK80_SERVICE } == true
+            val nameMatch = dev.name?.equals("DK80", ignoreCase = true) == true
+            if (!hasService && !nameMatch) return
             stopScan()
             _state.value = BleState.Connecting
             _deviceName.value = dev.name ?: "DK80"
@@ -147,11 +153,6 @@ class BleManager private constructor(context: Context) {
             writeInProgress = false
             pumpWriteQueue()
         }
-
-        @Deprecated("Deprecated in Java")
-        override fun onCharacteristicWrite(
-            g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int, writeType: Int
-        ) { onCharacteristicWrite(g, c, status) }
     }
 
     // -------------------- 扫描 / 连接 / 断开 --------------------
@@ -159,12 +160,11 @@ class BleManager private constructor(context: Context) {
     fun startScan() {
         val scanner = btAdapter?.bluetoothLeScanner ?: return
         _state.value = BleState.Scanning
-        val filter = ScanFilter.Builder().setServiceUuid(
-            android.os.ParcelUuid(BleUuids.DK80_SERVICE)
-        ).build()
+        // 不使用硬件 setServiceUuid 过滤（部分 Android OEM 解析不可靠），
+        // 改在 onScanResult 中按 DK80 服务 UUID / 设备名做软件过滤。
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-        scanner.startScan(listOf(filter), settings, scanCallback)
+        scanner.startScan(null, settings, scanCallback)
         mainHandler.postDelayed({ if (_state.value == BleState.Scanning) stopScan() }, 10_000)
     }
 
