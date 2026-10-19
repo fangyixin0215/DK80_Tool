@@ -61,6 +61,9 @@ class BleManager private constructor(context: Context) {
 
     private var mtu = 23
 
+    /* 用户主动断开标志：为 false 时扫描超时/异常断开都会自动重扫重连 */
+    @Volatile private var userClosed = false
+
     private val _state = MutableStateFlow(BleState.Disconnected)
     val state: StateFlow<BleState> = _state.asStateFlow()
 
@@ -113,8 +116,14 @@ class BleManager private constructor(context: Context) {
                 _state.value = BleState.Connected
                 g.requestMtu(247)
             } else {
-                _state.value = BleState.Disconnected
                 closeGatt()
+                if (!userClosed) {
+                    /* 异常断开/连接失败：自动回到扫描，持续重连（设备重启窗口也能自己恢复） */
+                    _state.value = BleState.Scanning
+                    mainHandler.postDelayed({ beginScan() }, 1200)
+                } else {
+                    _state.value = BleState.Disconnected
+                }
             }
         }
 
@@ -158,6 +167,12 @@ class BleManager private constructor(context: Context) {
     // -------------------- 扫描 / 连接 / 断开 --------------------
 
     fun startScan() {
+        if (_state.value == BleState.Scanning) return
+        userClosed = false
+        beginScan()
+    }
+
+    private fun beginScan() {
         val scanner = btAdapter?.bluetoothLeScanner ?: return
         _state.value = BleState.Scanning
         // 不使用硬件 setServiceUuid 过滤（部分 Android OEM 解析不可靠），
@@ -165,7 +180,12 @@ class BleManager private constructor(context: Context) {
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         scanner.startScan(null, settings, scanCallback)
-        mainHandler.postDelayed({ if (_state.value == BleState.Scanning) stopScan() }, 10_000)
+        // 10 秒扫不到先停一拍再继续扫，直到用户主动断开
+        mainHandler.postDelayed({
+            if (userClosed || _state.value != BleState.Scanning) return@postDelayed
+            scanner.stopScan(scanCallback)
+            if (!userClosed) mainHandler.postDelayed({ beginScan() }, 600)
+        }, 10_000)
     }
 
     fun stopScan() {
@@ -174,8 +194,11 @@ class BleManager private constructor(context: Context) {
     }
 
     fun disconnect() {
-        stopScan()
+        userClosed = true
+        mainHandler.removeCallbacksAndMessages(null)
+        btAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
         gatt?.disconnect()
+        _state.value = BleState.Disconnected
     }
 
     private fun closeGatt() {
@@ -225,9 +248,24 @@ class BleManager private constructor(context: Context) {
 
     fun requestInfo() { writeCommand("INFO?\n") }
 
-    fun setLogStream(on: Boolean) { writeCommand("LOG:${if (on) 1 else 0}\n") }
+    /* 日志流开关：状态保持在 BleManager（而非页面 remember），
+     * 切页/重建页面不丢；固件侧断连后标志仍有效，重连握手成功自动补发 LOG:1 恢复 */
+    private val _logStreamOn = MutableStateFlow(false)
+    val logStreamOn: StateFlow<Boolean> = _logStreamOn.asStateFlow()
+
+    fun setLogStream(on: Boolean) {
+        _logStreamOn.value = on
+        writeCommand("LOG:${if (on) 1 else 0}\n")
+    }
 
     fun requestStatus() { writeCommand("STA?\n") }
+
+    /* 切换气体检测类型：false=NH3 氨气, true=O3 臭氧（固件 GAS: 命令，落 flash，重启保持）。
+     * 本地乐观更新 info.gas，下次 INFO? 刷新兜底 */
+    fun setGasType(isO3: Boolean) {
+        writeCommand(if (isO3) "GAS:1\n" else "GAS:0\n")
+        _info.value = _info.value.copy(gas = if (isO3) "O3" else "NH3")
+    }
 
     fun startOta() { writeCommand("OTA:START\n") }
 
@@ -271,6 +309,8 @@ class BleManager private constructor(context: Context) {
             text.startsWith("HS:ACK") -> {
                 _handshake.value = text.trim()
                 _state.value = BleState.Ready
+                /* 日志流此前开着：断连期间固件标志仍有效，补发 LOG:1 恢复推送 */
+                if (_logStreamOn.value) writeCommand("LOG:1\n")
             }
             text.startsWith("KEY:ACK") -> { /* 按键应答，可按需处理 */ }
             text.startsWith("LOG:ACK") -> { /* 日志开关应答 */ }

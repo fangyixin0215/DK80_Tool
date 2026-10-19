@@ -45,7 +45,8 @@ fun LogScreen(ble: BleManager) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    var logOn by remember { mutableStateOf(false) }
+    // 日志开关状态在 BleManager 持有：切到其他页再回来不会丢（仍显示"停止"）
+    val logOn by ble.logStreamOn.collectAsState()
 
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
@@ -55,10 +56,7 @@ fun LogScreen(ble: BleManager) {
         // 控制栏
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = {
-                    logOn = !logOn
-                    ble.setLogStream(logOn)
-                },
+                onClick = { ble.setLogStream(!logOn) },
                 enabled = ready,
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
