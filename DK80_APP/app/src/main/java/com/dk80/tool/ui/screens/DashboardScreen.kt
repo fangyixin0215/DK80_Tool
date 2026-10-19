@@ -45,24 +45,17 @@ fun DashboardScreen(ble: BleManager) {
         // PM2.5 主卡片：大数字 + 空气质量等级
         Pm25HeroCard(pm25 = status.pm25)
 
-        // 传感器网格
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // 传感器卡片：气体 / 温度 / 湿度（PM10 硬件无此数据，不展示）
+        val isO3 = info.gas == "O3"
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SensorCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Outlined.Air,
-                label = if (info.gas == "O3") "臭氧 O₃" else "氨气 NH₃",
-                value = "${status.ozonePpb}",
-                unit = "ppb"
+                label = if (isO3) "臭氧 O₃" else "氨气 NH₃",
+                // 实测标定：两气体模组原始值均为 0.01ppm 单位
+                value = if (status.gasInvalid) "—" else "%.2f".format(status.gasRaw / 100f),
+                unit = "ppm"
             )
-            SensorCard(
-                modifier = Modifier.weight(1f),
-                icon = Icons.Outlined.Air,
-                label = "PM10",
-                value = "${status.pm10}",
-                unit = "µg/m³"
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             SensorCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Outlined.DeviceThermostat,
@@ -81,11 +74,16 @@ fun DashboardScreen(ble: BleManager) {
 
         // 运行状态
         SectionCard(title = "运行状态") {
+            StatusRow(
+                if (isO3) "O₃ 传感器" else "NH₃ 传感器",
+                if (status.gasOnline) "已连接" else "未连接",
+                icon = Icons.Outlined.Air,
+                valueColor = if (status.gasOnline) Good else Bad
+            )
+            Divider()
             StatusRow("风速档位", "${status.fanSpeed} 档", icon = Icons.Outlined.WindPower)
             Divider()
-            StatusRow("UV 杀菌", if (status.uvOn) "开启" else "关闭", accent = status.uvOn)
-            Divider()
-            StatusRow("臭氧发生器", if (status.ozoneGenOn) "开启" else "关闭", accent = status.ozoneGenOn)
+            StatusRow("等离子杀菌", if (status.uvOn) "开启" else "关闭", accent = status.uvOn)
         }
 
         // 设备身份
@@ -104,7 +102,7 @@ fun DashboardScreen(ble: BleManager) {
             Divider()
             InfoRow("编译时间", info.build)
             Divider()
-            InfoRow("气体类型", info.gas.ifEmpty { "—" })
+            GasTypeRow(current = info.gas, enabled = ready) { isO3 -> ble.setGasType(isO3) }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -189,11 +187,9 @@ private fun SensorCard(
             Spacer(Modifier.height(6.dp))
             Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
             Spacer(Modifier.height(2.dp))
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(value, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                Spacer(Modifier.width(3.dp))
-                Text(unit, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 3.dp))
-            }
+            /* 数值与单位竖排：一行三列后卡片变窄，"174.47" 这种 6 位数值 24sp 会换行断字 */
+            Text(value, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+            Text(unit, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -216,7 +212,13 @@ private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Un
 }
 
 @Composable
-private fun StatusRow(label: String, value: String, icon: ImageVector? = null, accent: Boolean = false) {
+private fun StatusRow(
+    label: String,
+    value: String,
+    icon: ImageVector? = null,
+    accent: Boolean = false,
+    valueColor: Color? = null
+) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -229,7 +231,7 @@ private fun StatusRow(label: String, value: String, icon: ImageVector? = null, a
         Text(
             value,
             fontWeight = FontWeight.SemiBold,
-            color = if (accent) Good else MaterialTheme.colorScheme.onSurface
+            color = valueColor ?: if (accent) Good else MaterialTheme.colorScheme.onSurface
         )
     }
 }
@@ -247,5 +249,33 @@ private fun InfoRow(label: String, value: String) {
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurface
         )
+    }
+}
+
+/* 气体检测类型切换：NH3 / O3 二选一，发送 GAS: 命令（固件落 flash 并即时刷新屏显） */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GasTypeRow(current: String, enabled: Boolean, onSelect: (Boolean) -> Unit) {
+    val isO3 = current.equals("O3", ignoreCase = true)
+    val hasValue = current.isNotEmpty()
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("气体检测类型", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(
+                selected = hasValue && !isO3,
+                onClick = { onSelect(false) },
+                enabled = enabled,
+                label = { Text("NH₃ 氨气", fontSize = 12.sp) }
+            )
+            FilterChip(
+                selected = isO3,
+                onClick = { onSelect(true) },
+                enabled = enabled,
+                label = { Text("O₃ 臭氧", fontSize = 12.sp) }
+            )
+        }
     }
 }
