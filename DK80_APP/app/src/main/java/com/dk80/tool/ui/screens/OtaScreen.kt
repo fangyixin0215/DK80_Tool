@@ -27,10 +27,12 @@ import kotlinx.coroutines.launch
 fun OtaScreen(ble: BleManager) {
     val state by ble.state.collectAsState()
     val progress by ble.otaProgress.collectAsState()
+    val phase by ble.otaPhase.collectAsState()
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val ready = state == BleState.Ready
     var msg by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -51,8 +53,8 @@ fun OtaScreen(ble: BleManager) {
         ) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StepRow(1, "选择固件 bin 文件")
-                StepRow(2, "App 切换到 OTA 服务并按 MTU 分片写入 RX 特征")
-                StepRow(3, "设备端 ota_service 校验并刷写，完成后自动重启")
+                StepRow(2, "查询存储基地址、擦除 flash、按 MTU 分包写入")
+                StepRow(3, "设备端校验并刷写，完成后自动重启")
             }
         }
 
@@ -68,23 +70,29 @@ fun OtaScreen(ble: BleManager) {
         if (msg.isNotEmpty()) {
             Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        if (phase.isNotEmpty()) {
+            Text(phase, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+        }
 
         Spacer(Modifier.height(4.dp))
 
         // 开始按钮
         Button(
             onClick = {
+                if (busy) return@Button
+                busy = true
                 scope.launch {
-                    val uri = selectedUri ?: return@launch
+                    val uri = selectedUri ?: run { busy = false; return@launch }
                     val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    if (bytes == null) { msg = "读取文件失败"; return@launch }
+                    if (bytes == null) { msg = "读取文件失败"; busy = false; return@launch }
                     ble.startOta()
-                    ble.sendOtaData(bytes) { ok ->
-                        msg = if (ok) "OTA 数据发送完成，等待设备刷写..." else "OTA 失败，请重试"
-                    }
+                    msg = "已通知设备，开始升级..."
+                    val ok = ble.sendOtaData(bytes)
+                    msg = if (ok) "升级完成，设备重启中..." else "OTA 失败，请重试"
+                    busy = false
                 }
             },
-            enabled = ready && selectedUri != null,
+            enabled = ready && selectedUri != null && !busy,
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape = RoundedCornerShape(14.dp)
         ) {

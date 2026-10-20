@@ -21,7 +21,6 @@ import com.dk80.tool.data.DeviceStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /** BLE 连接状态 */
@@ -101,6 +100,9 @@ class BleManager private constructor(context: Context) {
     // 待解析的 INFO 缓冲（INFO? 返回多行，到 INFO:END 结束）
     private val infoBuilder = StringBuilder()
 
+    /* OTA 服务缺失时 refresh+重发现 只自动重试一次 */
+    @Volatile private var otaDiscRetry = false
+
     // 串行写队列：保证 GATT write 有序（Android BLE 单次只允许一个未完成的写操作）
     private data class WriteJob(val char: BluetoothGattCharacteristic, val data: ByteArray, val ack: Boolean)
     private val writeQueue = ConcurrentLinkedQueue<WriteJob>()
@@ -127,6 +129,10 @@ class BleManager private constructor(context: Context) {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 _state.value = BleState.Connected
+                /* Android 按 MAC 缓存 GATT 服务表：固件新增服务（如 OTA）后
+                 * 不刷新会一直拿到旧缓存，getService(OTA) 返回 null。
+                 * refresh() 是隐藏 API，反射调用。 */
+                refreshGattCache(g)
                 g.requestMtu(247)
             } else {
                 closeGatt()
@@ -152,14 +158,40 @@ class BleManager private constructor(context: Context) {
             charCmd = svc.getCharacteristic(BleUuids.CHAR_CMD)
             charDebug = svc.getCharacteristic(BleUuids.CHAR_DEBUG)
 
-            val otaSvc = g.getService(BleUuids.OTA_SERVICE)
+            val otaSvc = g.getService(FreqchipOta.SVC)
             if (otaSvc != null) {
-                otaRx = otaSvc.getCharacteristic(BleUuids.OTA_CHAR_RX)
-                otaNoti = otaSvc.getCharacteristic(BleUuids.OTA_CHAR_NOTI)
+                otaRx = otaSvc.getCharacteristic(FreqchipOta.CHAR_RX)
+                otaNoti = otaSvc.getCharacteristic(FreqchipOta.CHAR_NOTI)
+                appendLog("OTA service discovered, rx=${otaRx != null} noti=${otaNoti != null}")
+            } else if (!otaDiscRetry) {
+                /* 服务缓存可能是旧库（Android 按 MAC 缓存 GATT DB）：refresh 后二次发现 */
+                otaDiscRetry = true
+                val ok = refreshGattCache(g)
+                appendLog("OTA service missing, gatt refresh=$ok, rediscover...")
+                mainHandler.postDelayed({ g.discoverServices() }, 300)
+            } else {
+                /* refresh+二次发现仍没有：枚举全部服务记日志，并按 UUID 尾部模糊匹配兜底 */
+                val all = g.services.orEmpty().map { it.uuid.toString().lowercase() }
+                appendLog("services(${all.size}): ${all.joinToString()}")
+                val fuzzy = g.services.orEmpty().firstOrNull {
+                    it.uuid.toString().lowercase().replace("-", "").endsWith("fe00")
+                }
+                if (fuzzy != null) {
+                    otaRx = fuzzy.getCharacteristic(FreqchipOta.CHAR_RX)
+                    otaNoti = fuzzy.getCharacteristic(FreqchipOta.CHAR_NOTI)
+                    appendLog("OTA service fuzzy-matched: ${fuzzy.uuid}, rx=${otaRx != null}")
+                } else {
+                    appendLog("OTA service STILL missing after refresh+rediscover")
+                }
             }
 
-            // 依次开启 CHAR1 / CHAR3 通知
-            enableNotify(charStatus) { enableNotify(charDebug) { sendHandshake() } }
+            // 依次开启 CHAR1 / CHAR3 / OTA 通知（OTA 应答只走 notify，CCC 不开设备不回包）。
+            // 必须串行：Android 同一连接上描述符写并发第二条会直接失败丢弃，
+            // otaNoti 的 CCC 与 charStatus 并发写过一次，导致 OTA 应答永远发不出
+            enableNotify(charStatus) { enableNotify(charDebug) { enableNotify(otaNoti) {
+                appendLog("notify enabled (status/debug/ota)")
+                sendHandshake()
+            } } }
         }
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
@@ -167,13 +199,19 @@ class BleManager private constructor(context: Context) {
             when (c.uuid) {
                 BleUuids.CHAR_STATUS -> _status.value = DeviceStatus.fromBytes(value)
                 BleUuids.CHAR_DEBUG -> handleDebugText(String(value))
-                BleUuids.OTA_CHAR_NOTI -> handleOtaNotify(value)
+                FreqchipOta.CHAR_NOTI -> otaEngine?.onNotify(value)
             }
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
+            otaEngine?.onWriteDone()
             writeInProgress = false
             pumpWriteQueue()
+        }
+
+        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS)
+                appendLog("desc write FAILED: char=${d.characteristic?.uuid} status=$status")
         }
 
         override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
@@ -223,6 +261,7 @@ class BleManager private constructor(context: Context) {
         gatt = null
         charStatus = null; charCmd = null; charDebug = null
         otaRx = null; otaNoti = null
+        otaDiscRetry = false
         writeQueue.clear(); writeInProgress = false
         mainHandler.removeCallbacks(rssiPoller)
         _rssi.value = Int.MIN_VALUE
@@ -232,22 +271,26 @@ class BleManager private constructor(context: Context) {
 
     private fun enableNotify(c: BluetoothGattCharacteristic?, done: () -> Unit) {
         if (c == null) { done(); return }
-        gatt?.setCharacteristicNotification(c, true)
-        val desc = c.getDescriptor(BleUuids.CCC) ?: run { done(); return }
-        desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        val g = gatt ?: run { done(); return }
+        g.setCharacteristicNotification(c, true)
+        val desc = c.getDescriptor(BleUuids.CCC) ?: run {
+            appendLog("notify enable: CCC descriptor missing, char=${c.uuid}")
+            done(); return
+        }
         writeDescriptor(desc, done)
     }
 
     private fun writeDescriptor(desc: BluetoothGattDescriptor, done: () -> Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt?.writeDescriptor(desc)
-            // TIRAMISU+ 通过 onDescriptorWrite 回调，这里简化：延迟继续
-            mainHandler.postDelayed(done, 120)
+        val g = gatt ?: run { done(); return }
+        val rc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
         } else {
             @Suppress("DEPRECATION") desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION") gatt?.writeDescriptor(desc)
-            mainHandler.postDelayed(done, 120)
+            @Suppress("DEPRECATION") if (g.writeDescriptor(desc)) BluetoothGatt.GATT_SUCCESS else 1
         }
+        if (rc != BluetoothGatt.GATT_SUCCESS) appendLog("writeDescriptor rejected, rc=$rc")
+        /* 串行节奏靠 120ms 间隔 + 回调链保证（描述符写并发第二条会被 Android 丢弃） */
+        mainHandler.postDelayed(done, 120)
     }
 
     // -------------------- 握手 / 命令 --------------------
@@ -318,6 +361,18 @@ class BleManager private constructor(context: Context) {
             @Suppress("DEPRECATION") c.value = job.data
             @Suppress("DEPRECATION") gatt?.writeCharacteristic(c)
         }
+        if (!job.ack) {
+            /* NO_RESPONSE 写入不会有 onCharacteristicWrite 回调，定时复位队列锁，
+             * 否则队列在第一个 no-response 包之后就停摆 */
+            mainHandler.postDelayed({ writeInProgress = false; pumpWriteQueue() }, 20)
+        }
+    }
+
+    /** 刷新 Android 端 GATT 服务缓存（隐藏 API，反射调用；部分 ROM 会拦截，返回是否成功） */
+    private fun refreshGattCache(g: BluetoothGatt): Boolean {
+        return try {
+            g.javaClass.getMethod("refresh").invoke(g) as Boolean
+        } catch (_: Exception) { false }
     }
 
     // -------------------- CHAR3 文本解析 --------------------
@@ -369,28 +424,33 @@ class BleManager private constructor(context: Context) {
 
     fun clearLogs() { _logs.value = emptyList() }
 
-    // -------------------- OTA（基本实现：按 MTU-3 分片写 OTA_RX） --------------------
+    // -------------------- OTA（委托给可移植的 FreqchipOta 传输层，见其文件头移植清单） --------------------
 
-    fun sendOtaData(file: ByteArray, onDone: (Boolean) -> Unit) {
-        if (otaRx == null) { onDone(false); return }
-        val max = (mtu - 3).coerceAtLeast(20)
-        _otaProgress.value = 0f
-        var off = 0
-        val sendNext = object : Runnable {
-            override fun run() {
-                if (off >= file.size) { onDone(true); return }
-                val end = (off + max).coerceAtMost(file.size)
-                enqueueWrite(otaRx!!, file.copyOfRange(off, end), false)
-                off = end
-                _otaProgress.value = off.toFloat() / file.size
-                mainHandler.postDelayed(this, 5)
-            }
+    @Volatile private var otaEngine: FreqchipOta? = null
+
+    /* OTA 当前阶段描述（擦除/写入进度），OTA 页展示 */
+    private val _otaPhase = MutableStateFlow("")
+    val otaPhase: StateFlow<String> = _otaPhase.asStateFlow()
+
+    /**
+     * 执行完整 OTA 流程：0x01 查基地址 -> 0x03 按 4KB 循环擦除 -> 0x05 分包写 -> 0x09 重启。
+     * 返回 true 表示升级指令已完整下发（设备随后自行复位重启）。
+     */
+    suspend fun sendOtaData(file: ByteArray): Boolean {
+        val rx = otaRx; val nt = otaNoti; val g = gatt
+        if (rx == null || nt == null || g == null) {
+            _otaPhase.value = "未发现 OTA 服务（手机 GATT 缓存未刷新）：请关闭再打开手机蓝牙，或重启手机后重试"
+            return false
         }
-        sendNext.run()
-    }
-
-    private fun handleOtaNotify(value: ByteArray) {
-        // OTA 进度/状态通知（按固件 ota_service 协议解析，此处预留）
-        appendLog("OTA NOTI: ${value.joinToString(" ") { "%02X".format(it) }}")
+        val engine = FreqchipOta(g, rx, nt, mtu)
+        otaEngine = engine
+        return try {
+            when (val r = engine.perform(file, onPhase = { _otaPhase.value = it }, onProgress = { _otaProgress.value = it })) {
+                is FreqchipOta.Result.Done -> true
+                is FreqchipOta.Result.Fail -> { _otaPhase.value = r.reason; false }
+            }
+        } finally {
+            otaEngine = null
+        }
     }
 }
