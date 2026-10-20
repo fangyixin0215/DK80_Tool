@@ -7,9 +7,11 @@ package com.dk80.tool.data
  *  [0..1] gas_raw     [2..3] pm2_5    [4..5] pm10(固件保留，App 不展示)
  *  [6..7] temp_x10    [8..9] humi_x10
  *  [10] fan_speed     [11] uv         [12] ozone_gen
- *  [13] bit0=气体传感器在线    [14..15] reserved
+ *  [13] bit0=气体传感器在线    [14] 4G CSQ rssi 0~31（0xFF=未知）
+ *  [15] bit0=SIM 卡已插入
  *
- * gas_raw：O3=ppb；NH3=0.01ppm（×100 的整数）
+ * gas_raw：两气体模组原始值均为 0.01ppm 单位（×100 的整数）
+ * csq：AT+CSQ rssi，dBm = -113 + 2*rssi；-1=未知/不可测
  */
 data class DeviceStatus(
     val gasRaw: Int = 0,
@@ -19,7 +21,9 @@ data class DeviceStatus(
     val fanSpeed: Int = 0,
     val uvOn: Boolean = false,
     val ozoneGenOn: Boolean = false,
-    val gasOnline: Boolean = false
+    val gasOnline: Boolean = false,
+    val csq: Int = -1,
+    val simReady: Boolean = false
 ) {
     val gasInvalid: Boolean get() = gasRaw == 0xFFFF
 
@@ -39,7 +43,12 @@ data class DeviceStatus(
                 fanSpeed = b[10].toInt() and 0xFF,
                 uvOn = (b[11].toInt() and 0xFF) != 0,
                 ozoneGenOn = (b[12].toInt() and 0xFF) != 0,
-                gasOnline = b.size >= 14 && (b[13].toInt() and 0x01) != 0
+                gasOnline = b.size >= 14 && (b[13].toInt() and 0x01) != 0,
+                csq = if (b.size >= 15) {
+                    val v = b[14].toInt() and 0xFF
+                    if (v == 0xFF) -1 else v
+                } else -1,
+                simReady = b.size >= 16 && (b[15].toInt() and 0x01) != 0
             )
         }
     }

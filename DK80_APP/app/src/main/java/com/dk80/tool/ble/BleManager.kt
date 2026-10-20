@@ -85,6 +85,19 @@ class BleManager private constructor(context: Context) {
     private val _otaProgress = MutableStateFlow(0f)
     val otaProgress: StateFlow<Float> = _otaProgress.asStateFlow()
 
+    /* 蓝牙信号强度（手机读设备的 RSSI，dBm；Int.MIN_VALUE=未知/未连接） */
+    private val _rssi = MutableStateFlow(Int.MIN_VALUE)
+    val rssi: StateFlow<Int> = _rssi.asStateFlow()
+
+    /* Ready 期间每 3s 轮询一次 RSSI；状态离开 Ready 后自动停（run 里自检） */
+    private val rssiPoller = object : Runnable {
+        override fun run() {
+            if (_state.value != BleState.Ready) return
+            gatt?.readRemoteRssi()
+            mainHandler.postDelayed(this, 3000)
+        }
+    }
+
     // 待解析的 INFO 缓冲（INFO? 返回多行，到 INFO:END 结束）
     private val infoBuilder = StringBuilder()
 
@@ -162,6 +175,10 @@ class BleManager private constructor(context: Context) {
             writeInProgress = false
             pumpWriteQueue()
         }
+
+        override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) _rssi.value = rssi
+        }
     }
 
     // -------------------- 扫描 / 连接 / 断开 --------------------
@@ -207,6 +224,8 @@ class BleManager private constructor(context: Context) {
         charStatus = null; charCmd = null; charDebug = null
         otaRx = null; otaNoti = null
         writeQueue.clear(); writeInProgress = false
+        mainHandler.removeCallbacks(rssiPoller)
+        _rssi.value = Int.MIN_VALUE
     }
 
     // -------------------- 通知开启（链式） --------------------
@@ -311,6 +330,7 @@ class BleManager private constructor(context: Context) {
                 _state.value = BleState.Ready
                 /* 日志流此前开着：断连期间固件标志仍有效，补发 LOG:1 恢复推送 */
                 if (_logStreamOn.value) writeCommand("LOG:1\n")
+                mainHandler.post(rssiPoller)
             }
             text.startsWith("KEY:ACK") -> { /* 按键应答，可按需处理 */ }
             text.startsWith("LOG:ACK") -> { /* 日志开关应答 */ }

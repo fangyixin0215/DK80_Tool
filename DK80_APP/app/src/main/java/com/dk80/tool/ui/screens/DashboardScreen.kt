@@ -32,6 +32,7 @@ fun DashboardScreen(ble: BleManager) {
     val status by ble.status.collectAsState()
     val info by ble.info.collectAsState()
     val state by ble.state.collectAsState()
+    val rssi by ble.rssi.collectAsState()
     val ready = state == BleState.Ready
 
     LaunchedEffect(ready) {
@@ -84,6 +85,42 @@ fun DashboardScreen(ble: BleManager) {
             StatusRow("风速档位", "${status.fanSpeed} 档", icon = Icons.Outlined.WindPower)
             Divider()
             StatusRow("等离子杀菌", if (status.uvOn) "开启" else "关闭", accent = status.uvOn)
+            Divider()
+            GasTypeRow(current = info.gas, enabled = ready) { isO3 -> ble.setGasType(isO3) }
+        }
+
+        // 4G 信号（CSQ rssi -> dBm = -113 + 2*rssi）与蓝牙信号（RSSI）分档，
+        // 档位口径对齐安卓手机信号格习惯；颜色：满格绿→中黄→差红
+        val csqDbm = if (status.csq in 0..31) -113 + 2 * status.csq else null
+        val csqText = when {
+            csqDbm == null -> "—"
+            else -> "$csqDbm dBm (CSQ ${status.csq})"
+        }
+        val csqLevel = when {
+            csqDbm == null -> 0
+            csqDbm >= -73  -> 4
+            csqDbm >= -85  -> 3
+            csqDbm >= -95  -> 2
+            csqDbm >= -105 -> 1
+            else           -> 0
+        }
+        val rssiText = if (rssi != Int.MIN_VALUE) "$rssi dBm" else "—"
+        val rssiLevel = when {
+            rssi == Int.MIN_VALUE -> 0
+            rssi >= -55           -> 4
+            rssi >= -65           -> 3
+            rssi >= -75           -> 2
+            rssi >= -85           -> 1
+            else                  -> 0
+        }
+        // 信号格颜色：4 格绿 / 3 格绿 / 2 格黄 / 1 格红 / 0 格灰
+        @Composable
+        fun signalColor(level: Int): Color = when (level) {
+            4 -> Color(0xFF10B981)   // 绿
+            3 -> Color(0xFF10B981)   // 绿
+            2 -> Color(0xFFF59E0B)   // 黄
+            1 -> Color(0xFFEF4444)   // 红
+            else -> MaterialTheme.colorScheme.outlineVariant
         }
 
         // 设备身份
@@ -94,15 +131,23 @@ fun DashboardScreen(ble: BleManager) {
             Divider()
             InfoRow("IMSI", info.imsi)
             Divider()
+            InfoRow(
+                "SIM 卡",
+                if (status.simReady) "已插入" else "未插入",
+                valueColor = if (status.simReady) Good else Bad
+            )
+            Divider()
             InfoRow("MAC", info.mac)
+            Divider()
+            SignalRow("4G 信号", csqLevel, csqText, signalColor(csqLevel))
+            Divider()
+            SignalRow("蓝牙信号", rssiLevel, rssiText, signalColor(rssiLevel))
             Divider()
             InfoRow("固件版本", info.fw)
             Divider()
             InfoRow("硬件版本", info.hw)
             Divider()
             InfoRow("编译时间", info.build)
-            Divider()
-            GasTypeRow(current = info.gas, enabled = ready) { isO3 -> ble.setGasType(isO3) }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -237,7 +282,7 @@ private fun StatusRow(
 }
 
 @Composable
-private fun InfoRow(label: String, value: String) {
+private fun InfoRow(label: String, value: String, valueColor: Color? = null) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -247,8 +292,50 @@ private fun InfoRow(label: String, value: String) {
             value.ifEmpty { "—" },
             fontWeight = FontWeight.Medium,
             fontSize = 13.sp,
+            color = valueColor ?: MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+/* 信号行：信号格图标 + dBm 文本；barColor 为信号格主色（绿/黄/红） */
+@Composable
+private fun SignalRow(label: String, level: Int, text: String, barColor: Color) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        SignalBars(level, barColor)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text,
+            fontWeight = FontWeight.Medium,
+            fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurface
         )
+    }
+}
+
+/* 手机信号格：4 根递增高条，level 0..4 高亮前 level 根；
+ * 高亮条用传入的 barColor（绿/黄/红，随信号强度变化），未高亮条用灰色 */
+@Composable
+private fun SignalBars(level: Int, barColor: Color) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        for (i in 0..3) {
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .height((6 + i * 3).dp)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(
+                        if (i < level) barColor
+                        else MaterialTheme.colorScheme.outlineVariant
+                    )
+            )
+        }
     }
 }
 
