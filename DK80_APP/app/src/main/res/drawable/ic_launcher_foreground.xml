@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标前景：把原始 PNG 内缩 18%，确保四角元素不被系统遮罩裁掉 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:drawable="@drawable/ic_launcher"
+        android:inset="12%" />
+</layer-list>

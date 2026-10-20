@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SettingsRemote
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -27,25 +28,29 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.dk80.tool.ble.BleManager
 import com.dk80.tool.ui.components.ConnectionBar
+import com.dk80.tool.ui.screens.AboutScreen
 import com.dk80.tool.ui.screens.DashboardScreen
 import com.dk80.tool.ui.screens.LogScreen
 import com.dk80.tool.ui.screens.OtaScreen
 import com.dk80.tool.ui.screens.RemoteScreen
 import com.dk80.tool.ui.theme.DK80Theme
-
 class MainActivity : ComponentActivity() {
     private lateinit var ble: BleManager
 
-    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+    /* 权限授予后默认开启扫描连接（需求：打开 APP 即自动扫描，无需手点） */
+    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (grants.isNotEmpty() && grants.all { it.value }) ble.startScan()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ble = BleManager.get(this)
-        ensurePermissions()
+        if (ensurePermissions()) ble.startScan()   /* 权限已齐：立即开始扫描 */
         setContent { DK80Theme { App(ble) } }
     }
 
-    private fun ensurePermissions() {
+    /* 返回 true = 权限已具备（无需弹框） */
+    private fun ensurePermissions(): Boolean {
         val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         else
@@ -53,7 +58,12 @@ class MainActivity : ComponentActivity() {
         val need = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (need.isNotEmpty()) permLauncher.launch(need.toTypedArray())
+        return if (need.isEmpty()) {
+            true
+        } else {
+            permLauncher.launch(need.toTypedArray())
+            false
+        }
     }
 }
 
@@ -62,7 +72,8 @@ private val tabs = listOf(
     Tab("remote", "遥控", Icons.Filled.SettingsRemote),
     Tab("dashboard", "工况", Icons.Filled.Info),
     Tab("log", "日志", Icons.Filled.List),
-    Tab("ota", "OTA", Icons.Filled.SystemUpdate)
+    Tab("ota", "OTA", Icons.Filled.SystemUpdate),
+    Tab("about", "关于", Icons.Filled.Person)
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,7 +90,7 @@ private fun App(ble: BleManager) {
             TopAppBar(
                 title = {
                     Text(
-                        "DK80 Tool",
+                        "DK80_Tool",
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground
                     )
@@ -119,6 +130,7 @@ private fun App(ble: BleManager) {
                 composable("dashboard") { DashboardScreen(ble) }
                 composable("log") { LogScreen(ble) }
                 composable("ota") { OtaScreen(ble) }
+                composable("about") { AboutScreen() }
             }
         }
     }

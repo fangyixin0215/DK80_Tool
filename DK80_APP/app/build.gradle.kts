@@ -11,8 +11,8 @@ android {
         applicationId = "com.dk80.tool"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 6
+        versionName = "1.0.5"
     }
 
     buildTypes {
@@ -21,12 +21,19 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+    // APK 输出命名：DK80_Tool_v<versionName>.apk
+    applicationVariants.configureEach {
+        for (output in outputs) {
+            (output as com.android.build.gradle.internal.api.ApkVariantOutputImpl).outputFileName =
+                "DK80_Tool_v${versionName}.apk"
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
     packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
 }
