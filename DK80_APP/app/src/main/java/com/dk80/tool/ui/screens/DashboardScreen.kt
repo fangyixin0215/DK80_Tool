@@ -82,6 +82,33 @@ fun DashboardScreen(ble: BleManager) {
                 valueColor = if (status.gasOnline) Good else Bad
             )
             Divider()
+            /* 工作模式 + 档位 + 已运行/剩余（固件 CHAR1 byte16..22） */
+            val modeName = when (status.mode) { 1 -> "定时"; 2 -> "循环"; 3 -> "预约"; else -> "待机" }
+            val timingMins = intArrayOf(30, 60, 120, 180, 240)
+            val modeDetail = when {
+                status.mode == 1 && status.modeGroup in 1..5 -> "${timingMins[status.modeGroup - 1]}分钟档"
+                status.mode == 3 && status.modeGroup in 1..6 -> "第${status.modeGroup}组"
+                status.modeGroup > 0 -> "${status.modeGroup}档"
+                else -> ""
+            }
+            StatusRow(
+                "工作模式",
+                if (modeDetail.isEmpty()) modeName else "$modeName · $modeDetail",
+                accent = status.working
+            )
+            Divider()
+            StatusRow("已运行", if (status.working) formatHMS(status.runSec) else "—")
+            Divider()
+            StatusRow(
+                "剩余时间",
+                when {
+                    !status.working -> "—"
+                    status.remainSec > 0 -> formatHMS(status.remainSec)
+                    else -> "—"
+                },
+                accent = status.working
+            )
+            Divider()
             StatusRow("风速档位", "${status.fanSpeed} 档", icon = Icons.Outlined.WindPower)
             Divider()
             StatusRow("等离子杀菌", if (status.uvOn) "开启" else "关闭", accent = status.uvOn)
@@ -150,24 +177,25 @@ fun DashboardScreen(ble: BleManager) {
             InfoRow("编译时间", info.build)
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                onClick = { ble.requestInfo() }, enabled = ready,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Filled.Refresh, null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("刷新信息")
-            }
-            OutlinedButton(
-                onClick = { ble.requestStatus() }, enabled = ready,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(12.dp)
-            ) { Text("刷新状态") }
+        Button(
+            onClick = { ble.requestInfo(); ble.requestStatus() }, enabled = ready,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(Icons.Filled.Refresh, null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("刷新")
         }
         Spacer(Modifier.height(4.dp))
     }
+}
+
+/* 秒 -> "H小时M分" / "M分S秒"，供已运行/剩余时间展示 */
+private fun formatHMS(sec: Int): String {
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) "${h}小时${m}分" else "${m}分${s}秒"
 }
 
 // ---- PM2.5 主卡片 ----
@@ -351,17 +379,27 @@ private fun GasTypeRow(current: String, enabled: Boolean, onSelect: (Boolean) ->
     ) {
         Text("气体检测类型", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, modifier = Modifier.weight(1f))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            /* 深色模式下默认 FilterChip 选中色（secondaryContainer）发灰暗淡，
+             * 显式指定：选中=绿底白字，未选中=暗底描边，两种主题下一致 */
+            val chipColors = FilterChipDefaults.filterChipColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                selectedContainerColor = Good,
+                selectedLabelColor = Color.White
+            )
             FilterChip(
                 selected = hasValue && !isO3,
                 onClick = { onSelect(false) },
                 enabled = enabled,
-                label = { Text("NH₃ 氨气", fontSize = 12.sp) }
+                label = { Text("NH₃ 氨气", fontSize = 12.sp) },
+                colors = chipColors
             )
             FilterChip(
                 selected = isO3,
                 onClick = { onSelect(true) },
                 enabled = enabled,
-                label = { Text("O₃ 臭氧", fontSize = 12.sp) }
+                label = { Text("O₃ 臭氧", fontSize = 12.sp) },
+                colors = chipColors
             )
         }
     }
